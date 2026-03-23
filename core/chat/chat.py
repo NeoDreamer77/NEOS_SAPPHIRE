@@ -216,7 +216,7 @@ class LLMChat:
 
     def _get_system_prompt(self):
         username = getattr(config, 'DEFAULT_USERNAME', 'Human Scum')
-        ai_name = 'Sapphire'
+        ai_name = 'NEOS'
         # Sanitize curly brackets to prevent template injection
         username = username.replace('{', '').replace('}', '')
         prompt_template = self.current_system_prompt or "System prompt not loaded."
@@ -882,13 +882,50 @@ class LLMChat:
 
                 raise ConnectionError(f"Provider '{chat_primary}' failed health check - no fallback for specific provider selection")
             
-            # Auto mode - use global fallback order
-            result = get_first_available_provider(
-                providers_config,
-                fallback_order,
-                config.LLM_REQUEST_TIMEOUT,
-                force_privacy=chat_settings.get('private_chat', False)
-            )
+            # Auto mode - use task-based routing or global fallback order
+            result = None
+            
+            # Try task-based routing first
+            task_routing_config = getattr(config, 'LLM_TASK_ROUTING', None)
+            if task_routing_config and task_routing_config.get('enabled', False):
+                try:
+                    from core.chat.task_router import classify_task, get_task_routing_config
+                    
+                    routing_cfg = task_routing_config.get('routing_rules', {})
+                    if not routing_cfg:
+                        routing_cfg = get_task_routing_config()['routing_rules']
+                    
+                    has_tools = chat_settings.get('toolset') and chat_settings.get('toolset') != 'none'
+                    task_type, confidence, patterns = classify_task(chat_primary, has_tools)
+                    logger.info(f"Task classification: {task_type} (confidence: {confidence})")
+                    
+                    if task_type in routing_cfg:
+                        rule = routing_cfg[task_type]
+                        task_preferred = rule.get('preferred_providers', [])
+                        task_fallback = rule.get('fallback_providers', [])
+                        
+                        # Combine preferred + fallback, avoid duplicates
+                        task_order = task_preferred + [p for p in task_fallback if p not in task_preferred]
+                        
+                        if task_order:
+                            logger.info(f"Task routing: using {task_order} for task type '{task_type}'")
+                            result = get_first_available_provider(
+                                providers_config,
+                                task_order,
+                                config.LLM_REQUEST_TIMEOUT,
+                                force_privacy=chat_settings.get('private_chat', False)
+                            )
+                except Exception as e:
+                    logger.warning(f"Task routing failed, falling back to global order: {e}")
+            
+            # Fall back to global fallback order if task routing didn't work
+            if not result:
+                result = get_first_available_provider(
+                    providers_config,
+                    fallback_order,
+                    config.LLM_REQUEST_TIMEOUT,
+                    force_privacy=chat_settings.get('private_chat', False)
+                )
             
             if result:
                 provider_key, provider = result
@@ -973,7 +1010,7 @@ class LLMChat:
             
             # Apply name substitutions
             username = getattr(config, 'DEFAULT_USERNAME', 'Human')
-            ai_name = 'Sapphire'
+            ai_name = 'NEOS'
             system_prompt = system_prompt.replace("{user_name}", username).replace("{ai_name}", ai_name)
             
             # Inject datetime if enabled (user's timezone)

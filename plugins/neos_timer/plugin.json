@@ -1,0 +1,24 @@
+{
+    "name": "neos_timer",
+    "display_name": "NEOS Timer",
+    "description": "Timer and reminder plugin with sound, desktop notifications, and phone alerts",
+    "version": "1.0.0",
+    "author": "Neo",
+    "enabled": true,
+    "system": true,
+    "priority": 10,
+    "hooks": [
+        "on_timer_tick",
+        "on_timer_complete"
+    ],
+    "config": {
+        "default_sound": true,
+        "default_sound_type": "beep",
+        "default_repeat": 3,
+        "default_repeat_interval": 3,
+        "default_desktop": true,
+        "default_phone": false,
+        "ntfy_topic": "NEOS-Timer",
+        "ntfy_enabled": false
+    }
+}
