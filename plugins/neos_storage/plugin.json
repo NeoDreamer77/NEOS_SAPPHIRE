@@ -1,0 +1,48 @@
+{
+  "name": "neos_storage",
+  "version": "1.0.0",
+  "description": "NEOS Storage Monitor - Tracks memory usage and warns when approaching limits",
+  "author": "Neo",
+  "system": true,
+  "priority": 4,
+  "default_enabled": true,
+  "capabilities": {
+    "schedule": [
+      {
+        "name": "NEOS Storage Check",
+        "cron": "0 */6 * * *",
+        "enabled": true,
+        "description": "Monitor memory and storage usage",
+        "handler": "handlers.py",
+        "function": "run_storage_check"
+      }
+    ]
+  },
+  "config": {
+    "enabled": true,
+    "check_interval": "0 */6 * * *",
+    "warning_threshold": 80,
+    "critical_threshold": 95,
+    "track_scopes": true,
+    "send_notifications": true
+  },
+  "settings_ui": {
+    "enabled": {
+      "type": "boolean",
+      "label": "Enable Storage Monitoring",
+      "description": "Track memory and storage usage"
+    },
+    "warning_threshold": {
+      "type": "number",
+      "min": 50,
+      "max": 95,
+      "label": "Warning Threshold (%)",
+      "description": "Warn when storage reaches this percentage"
+    },
+    "check_interval": {
+      "type": "cron",
+      "label": "Check Interval",
+      "description": "How often to check storage (default: every 6 hours)"
+    }
+  }
+}

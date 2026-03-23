@@ -1,0 +1,47 @@
+{
+  "name": "neos_sleep",
+  "version": "1.0.0",
+  "description": "NEOS Memory Consolidation - Scheduled sleep cycles for memory optimization",
+  "author": "Neo",
+  "system": true,
+  "priority": 5,
+  "default_enabled": true,
+  "capabilities": {
+    "schedule": [
+      {
+        "name": "NEOS Memory Consolidation",
+        "cron": "0 5 * * *",
+        "enabled": true,
+        "description": "Daily memory consolidation and optimization",
+        "handler": "handlers.py",
+        "function": "run_sleep_cycle"
+      }
+    ]
+  },
+  "config": {
+    "enabled": true,
+    "sleep_time": "0 5 * * *",
+    "consolidation_mode": "medium",
+    "target_scopes": ["all"],
+    "create_summaries": true,
+    "backup_before_consolidation": true
+  },
+  "settings_ui": {
+    "enabled": {
+      "type": "boolean",
+      "label": "Enable Sleep Cycles",
+      "description": "Run memory consolidation at scheduled time"
+    },
+    "sleep_time": {
+      "type": "cron",
+      "label": "Sleep Schedule",
+      "description": "Cron expression for when to run (default: 5 AM daily)"
+    },
+    "consolidation_mode": {
+      "type": "select",
+      "options": ["light", "medium", "deep"],
+      "label": "Consolidation Depth",
+      "description": "How aggressive to consolidate memories"
+    }
+  }
+}

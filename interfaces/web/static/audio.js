@@ -177,7 +177,8 @@ export const playText = async (txt, cacheKey = null) => {
         isStreaming = false;
         ui.hideStatus();
         if (!e.message?.includes('cancelled') && !e.message?.includes('aborted') &&
-            !e.name?.includes('NotAllowedError') && !e.message?.includes('autoplay')) {
+            !e.name?.includes('NotAllowedError') && !e.message?.includes('autoplay') &&
+            !e.message?.includes('media was removed') && !e.message?.includes('interrupted')) {
             ui.showToast(`Audio error: ${e.message}`, 'error');
         }
     }

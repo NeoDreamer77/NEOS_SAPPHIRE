@@ -98,6 +98,120 @@ export default {
             });
         });
 
+        // Test voice button
+        const testVoiceBtn = container.querySelector('#sb-test-voice');
+        if (testVoiceBtn) {
+            testVoiceBtn.addEventListener('click', async () => {
+                const voiceSel = container.querySelector('#sb-voice');
+                const pitchSlider = container.querySelector('#sb-pitch');
+                const speedSlider = container.querySelector('#sb-speed');
+                
+                if (!voiceSel || !voiceSel.value) {
+                    alert('No voice selected');
+                    return;
+                }
+
+                // Show loading state
+                testVoiceBtn.disabled = true;
+                testVoiceBtn.textContent = '⏳ Generating...';
+
+                try {
+                    const csrf = document.querySelector('meta[name="csrf-token"]')?.content || '';
+                    const response = await fetch('/api/tts/preview', {
+                        method: 'POST',
+                        headers: { 
+                            'Content-Type': 'application/json',
+                            'X-CSRF-Token': csrf
+                        },
+                        body: JSON.stringify({
+                            text: "Hello! This is my voice.",
+                            voice: voiceSel.value,
+                            pitch: parseFloat(pitchSlider?.value || 0.98),
+                            speed: parseFloat(speedSlider?.value || 1.3)
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+
+                    // Get audio blob
+                    const audioBlob = await response.blob();
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    
+                    // Create audio element and add to DOM to prevent garbage collection
+                    const audio = document.createElement('audio');
+                    audio.style.display = 'none';
+                    document.body.appendChild(audio);
+                    
+                    let playAttempted = false;
+                    
+                    const cleanup = () => {
+                        if (audio.parentNode) {
+                            audio.parentNode.removeChild(audio);
+                        }
+                        URL.revokeObjectURL(audioUrl);
+                    };
+                    
+                    const tryPlay = async () => {
+                        if (playAttempted) return;
+                        playAttempted = true;
+                        
+                        try {
+                            await audio.play();
+                        } catch (playErr) {
+                            console.error('Audio play failed:', playErr);
+                            // Try once more after a short delay
+                            setTimeout(async () => {
+                                try {
+                                    await audio.play();
+                                } catch (retryErr) {
+                                    console.error('Audio retry failed:', retryErr);
+                                    // Silently fail - don't show error for common race conditions
+                                    if (!retryErr.message?.includes('media was removed') && 
+                                        !retryErr.message?.includes('interrupted')) {
+                                        alert('Audio playback failed. Please try again.');
+                                    }
+                                    cleanup();
+                                }
+                            }, 100);
+                        }
+                    };
+                    
+                    // Set up event listeners
+                    audio.addEventListener('canplaythrough', tryPlay, { once: true });
+                    
+                    audio.addEventListener('error', (e) => {
+                        console.error('Audio error:', e);
+                        alert('Audio playback error');
+                        cleanup();
+                    }, { once: true });
+                    
+                    audio.addEventListener('ended', () => {
+                        cleanup();
+                    }, { once: true });
+                    
+                    // Set source and load
+                    audio.src = audioUrl;
+                    audio.load();
+                    
+                    // Fallback: try to play after a short timeout if canplaythrough hasn't fired
+                    setTimeout(() => {
+                        if (!playAttempted) {
+                            tryPlay();
+                        }
+                    }, 500);
+
+                } catch (err) {
+                    console.error('Voice test failed:', err);
+                    alert('Failed to test voice: ' + err.message);
+                } finally {
+                    testVoiceBtn.disabled = false;
+                    testVoiceBtn.textContent = '🔊 Test Voice';
+                }
+            });
+        }
+
         // Sidebar chat picker
         const sbPicker = container.querySelector('#sb-chat-picker');
         const sbPickerBtn = container.querySelector('#sb-chat-picker-btn');
