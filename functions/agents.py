@@ -13,11 +13,14 @@ _db_path = None
 _db_initialized = False
 _db_lock = threading.Lock()
 
+from core.db_config import get_db_path
+
 
 def _get_db_path():
     global _db_path
     if _db_path is None:
-        _db_path = Path.home() / ".neos" / "core.db"
+        # Use centralized db_config for configurable database path
+        _db_path = get_db_path()
     return _db_path
 
 

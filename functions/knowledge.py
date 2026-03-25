@@ -1,7 +1,7 @@
 # functions/knowledge.py
 """
 Knowledge base system for reference data: people contacts and knowledge tabs.
-SQLite-backed with FTS5 search, semantic embeddings, and scope isolation.
+SQLite-backed with FTS5 search, semantic embeddings (Chroma), and scope isolation.
 People are scoped via people_scope. Knowledge tabs are scoped via knowledge_scope.
 """
 
@@ -14,20 +14,28 @@ from pathlib import Path
 from datetime import datetime
 from contextlib import contextmanager
 
+# Import Chroma functions for vector search
+from core.embeddings import (
+    chroma_add_knowledge as _chroma_add_knowledge,
+    chroma_search_knowledge as _chroma_search_knowledge,
+    chroma_add_people as _chroma_add_people,
+    chroma_search_people as _chroma_search_people,
+)
+
 logger = logging.getLogger(__name__)
 
 ENABLED = True
-EMOJI = '📖'
+EMOJI = "📖"
 
 _db_path = None
 _db_initialized = False
 _db_lock = threading.Lock()
 
 AVAILABLE_FUNCTIONS = [
-    'save_person',
-    'save_knowledge',
-    'search_knowledge',
-    'delete_knowledge',
+    "save_person",
+    "save_knowledge",
+    "search_knowledge",
+    "delete_knowledge",
 ]
 
 TOOLS = [
@@ -42,23 +50,23 @@ TOOLS = [
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Person's name (unique key, case-insensitive)"
+                        "description": "Person's name (unique key, case-insensitive)",
                     },
                     "relationship": {
                         "type": "string",
-                        "description": "Relationship to user (e.g. 'father', 'friend', 'coworker')"
+                        "description": "Relationship to user (e.g. 'father', 'friend', 'coworker')",
                     },
                     "phone": {"type": "string", "description": "Phone number"},
                     "email": {"type": "string", "description": "Email address"},
                     "address": {"type": "string", "description": "Physical address"},
                     "notes": {
                         "type": "string",
-                        "description": "Additional notes about this person"
-                    }
+                        "description": "Additional notes about this person",
+                    },
                 },
-                "required": ["name"]
-            }
-        }
+                "required": ["name"],
+            },
+        },
     },
     {
         "type": "function",
@@ -71,20 +79,20 @@ TOOLS = [
                 "properties": {
                     "category": {
                         "type": "string",
-                        "description": "Category to save under (e.g. 'recipes', 'books', 'research'). Auto-creates if new."
+                        "description": "Category to save under (e.g. 'recipes', 'books', 'research'). Auto-creates if new.",
                     },
                     "content": {
                         "type": "string",
-                        "description": "The information to store"
+                        "description": "The information to store",
                     },
                     "description": {
                         "type": "string",
-                        "description": "Optional category description (only used when creating a new category)"
-                    }
+                        "description": "Optional category description (only used when creating a new category)",
+                    },
                 },
-                "required": ["category", "content"]
-            }
-        }
+                "required": ["category", "content"],
+            },
+        },
     },
     {
         "type": "function",
@@ -97,24 +105,24 @@ TOOLS = [
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search terms (optional — omit to browse)"
+                        "description": "Search terms (optional — omit to browse)",
                     },
                     "category": {
                         "type": "string",
-                        "description": "Filter to or browse a specific category"
+                        "description": "Filter to or browse a specific category",
                     },
                     "id": {
                         "type": "integer",
-                        "description": "Read a specific entry in full by its ID"
+                        "description": "Read a specific entry in full by its ID",
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum results (default: 10)"
-                    }
+                        "description": "Maximum results (default: 10)",
+                    },
                 },
-                "required": []
-            }
-        }
+                "required": [],
+            },
+        },
     },
     {
         "type": "function",
@@ -127,26 +135,29 @@ TOOLS = [
                 "properties": {
                     "id": {
                         "type": "integer",
-                        "description": "Delete a specific entry by its ID"
+                        "description": "Delete a specific entry by its ID",
                     },
                     "category": {
                         "type": "string",
-                        "description": "Delete an entire category and all its entries"
-                    }
+                        "description": "Delete an entire category and all its entries",
+                    },
                 },
-                "required": []
-            }
-        }
-    }
+                "required": [],
+            },
+        },
+    },
 ]
 
 
 # ─── Database ─────────────────────────────────────────────────────────────────
+from core.db_config import get_db_path
+
 
 def _get_db_path():
     global _db_path
     if _db_path is None:
-        _db_path = Path(__file__).parent.parent / "user" / "knowledge.db"
+        # Use centralized db_config for configurable database path
+        _db_path = get_db_path()
     return _db_path
 
 
@@ -162,9 +173,9 @@ def _get_connection():
         conn.close()
 
 
-def _scope_condition(scope, col='scope'):
+def _scope_condition(scope, col="scope"):
     """Return (sql_fragment, params) that includes global overlay."""
-    if scope == 'global':
+    if scope == "global":
         return f"{col} = ?", [scope]
     return f"{col} IN (?, 'global')", [scope]
 
@@ -186,7 +197,7 @@ def _ensure_db():
         cursor.execute("PRAGMA foreign_keys=ON")
 
         # People (scoped via people_scope)
-        cursor.execute('''
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS people (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -200,28 +211,34 @@ def _ensure_db():
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
+        """)
         # Migration: add scope column if missing (existing DBs)
         try:
-            cursor.execute('SELECT scope FROM people LIMIT 1')
+            cursor.execute("SELECT scope FROM people LIMIT 1")
         except sqlite3.OperationalError:
-            cursor.execute("ALTER TABLE people ADD COLUMN scope TEXT NOT NULL DEFAULT 'default'")
+            cursor.execute(
+                "ALTER TABLE people ADD COLUMN scope TEXT NOT NULL DEFAULT 'default'"
+            )
             logger.info("Migrated people table: added scope column")
 
         # Migration: add email_whitelisted column if missing
         try:
-            cursor.execute('SELECT email_whitelisted FROM people LIMIT 1')
+            cursor.execute("SELECT email_whitelisted FROM people LIMIT 1")
         except sqlite3.OperationalError:
-            cursor.execute("ALTER TABLE people ADD COLUMN email_whitelisted INTEGER DEFAULT 0")
+            cursor.execute(
+                "ALTER TABLE people ADD COLUMN email_whitelisted INTEGER DEFAULT 0"
+            )
             logger.info("Migrated people table: added email_whitelisted column")
 
         # Unique per name+scope (drop old name-only index)
-        cursor.execute('DROP INDEX IF EXISTS idx_people_name_lower')
-        cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_people_name_scope ON people(LOWER(name), scope)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_people_scope ON people(scope)')
+        cursor.execute("DROP INDEX IF EXISTS idx_people_name_lower")
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_people_name_scope ON people(LOWER(name), scope)"
+        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_people_scope ON people(scope)")
 
         # Knowledge tabs (scoped)
-        cursor.execute('''
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS knowledge_tabs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -232,11 +249,13 @@ def _ensure_db():
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(name, scope)
             )
-        ''')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_tabs_scope ON knowledge_tabs(scope)')
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tabs_scope ON knowledge_tabs(scope)"
+        )
 
         # Knowledge entries (within tabs, chunked + embedded)
-        cursor.execute('''
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS knowledge_entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tab_id INTEGER NOT NULL REFERENCES knowledge_tabs(id) ON DELETE CASCADE,
@@ -247,8 +266,10 @@ def _ensure_db():
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_entries_tab ON knowledge_entries(tab_id)')
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_entries_tab ON knowledge_entries(tab_id)"
+        )
 
         # FTS5 on entries
         try:
@@ -263,20 +284,22 @@ def _ensure_db():
             _setup_fts(cursor)
 
         # Scope registries
-        cursor.execute('''
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS knowledge_scopes (
                 name TEXT PRIMARY KEY,
                 created DATETIME DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
-        cursor.execute("INSERT OR IGNORE INTO knowledge_scopes (name) VALUES ('default')")
+        """)
+        cursor.execute(
+            "INSERT OR IGNORE INTO knowledge_scopes (name) VALUES ('default')"
+        )
 
-        cursor.execute('''
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS people_scopes (
                 name TEXT PRIMARY KEY,
                 created DATETIME DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
+        """)
         cursor.execute("INSERT OR IGNORE INTO people_scopes (name) VALUES ('default')")
 
         conn.commit()
@@ -326,20 +349,24 @@ def _setup_fts(cursor):
     fts_count = cursor.fetchone()[0]
     if entry_count > 0 and fts_count == 0:
         logger.info(f"Populating knowledge FTS5 from {entry_count} entries...")
-        cursor.execute("INSERT INTO knowledge_fts(rowid, content) SELECT id, content FROM knowledge_entries")
+        cursor.execute(
+            "INSERT INTO knowledge_fts(rowid, content) SELECT id, content FROM knowledge_entries"
+        )
 
 
 def _get_current_scope():
     try:
         from core.chat.function_manager import scope_knowledge
+
         return scope_knowledge.get()
     except Exception:
-        return 'default'
+        return "default"
 
 
 def _get_current_rag_scope():
     try:
         from core.chat.function_manager import scope_rag
+
         return scope_rag.get()
     except Exception:
         return None
@@ -348,15 +375,17 @@ def _get_current_rag_scope():
 def _get_current_people_scope():
     try:
         from core.chat.function_manager import scope_people
+
         return scope_people.get()
     except Exception:
-        return 'default'
+        return "default"
 
 
 def _get_embedder():
     """Get the singleton embedder directly from core.embeddings."""
     try:
         from core.embeddings import get_embedder
+
         return get_embedder()
     except Exception as e:
         logger.warning(f"Could not get embedder: {e}")
@@ -368,16 +397,20 @@ SIMILARITY_THRESHOLD = 0.40
 
 # ─── Public API (used by api_fastapi.py) ──────────────────────────────────────
 
+
 def get_scopes():
     try:
         with _get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT scope, COUNT(*) FROM knowledge_tabs GROUP BY scope')
+            cursor.execute("SELECT scope, COUNT(*) FROM knowledge_tabs GROUP BY scope")
             tab_counts = {row[0]: row[1] for row in cursor.fetchall()}
-            cursor.execute('SELECT name FROM knowledge_scopes ORDER BY name')
+            cursor.execute("SELECT name FROM knowledge_scopes ORDER BY name")
             registered = [row[0] for row in cursor.fetchall()]
-            all_scopes = set(registered) | set(tab_counts.keys()) | {'default'}
-            return [{"name": name, "count": tab_counts.get(name, 0)} for name in sorted(all_scopes)]
+            all_scopes = set(registered) | set(tab_counts.keys()) | {"default"}
+            return [
+                {"name": name, "count": tab_counts.get(name, 0)}
+                for name in sorted(all_scopes)
+            ]
     except Exception as e:
         logger.error(f"Error getting knowledge scopes: {e}")
         return [{"name": "default", "count": 0}]
@@ -387,7 +420,9 @@ def create_scope(name: str) -> bool:
     try:
         with _get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("INSERT OR IGNORE INTO knowledge_scopes (name) VALUES (?)", (name,))
+            cursor.execute(
+                "INSERT OR IGNORE INTO knowledge_scopes (name) VALUES (?)", (name,)
+            )
             conn.commit()
             return True
     except Exception as e:
@@ -397,20 +432,30 @@ def create_scope(name: str) -> bool:
 
 def delete_scope(name: str) -> dict:
     """Delete a knowledge scope, ALL its tabs, and ALL entries within those tabs."""
-    if name == 'default':
+    if name == "default":
         return {"error": "Cannot delete the default scope"}
     try:
         with _get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT COUNT(*) FROM knowledge_tabs WHERE scope = ?', (name,))
+            cursor.execute(
+                "SELECT COUNT(*) FROM knowledge_tabs WHERE scope = ?", (name,)
+            )
             tab_count = cursor.fetchone()[0]
-            cursor.execute('SELECT COUNT(*) FROM knowledge_entries WHERE tab_id IN (SELECT id FROM knowledge_tabs WHERE scope = ?)', (name,))
+            cursor.execute(
+                "SELECT COUNT(*) FROM knowledge_entries WHERE tab_id IN (SELECT id FROM knowledge_tabs WHERE scope = ?)",
+                (name,),
+            )
             entry_count = cursor.fetchone()[0]
-            cursor.execute('DELETE FROM knowledge_entries WHERE tab_id IN (SELECT id FROM knowledge_tabs WHERE scope = ?)', (name,))
-            cursor.execute('DELETE FROM knowledge_tabs WHERE scope = ?', (name,))
-            cursor.execute('DELETE FROM knowledge_scopes WHERE name = ?', (name,))
+            cursor.execute(
+                "DELETE FROM knowledge_entries WHERE tab_id IN (SELECT id FROM knowledge_tabs WHERE scope = ?)",
+                (name,),
+            )
+            cursor.execute("DELETE FROM knowledge_tabs WHERE scope = ?", (name,))
+            cursor.execute("DELETE FROM knowledge_scopes WHERE name = ?", (name,))
             conn.commit()
-            logger.info(f"Deleted knowledge scope '{name}' with {tab_count} tabs and {entry_count} entries")
+            logger.info(
+                f"Deleted knowledge scope '{name}' with {tab_count} tabs and {entry_count} entries"
+            )
             return {"deleted_tabs": tab_count, "deleted_entries": entry_count}
     except Exception as e:
         logger.error(f"Failed to delete knowledge scope '{name}': {e}")
@@ -419,16 +464,20 @@ def delete_scope(name: str) -> dict:
 
 # ─── People Scope CRUD ────────────────────────────────────────────────────────
 
+
 def get_people_scopes():
     try:
         with _get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT scope, COUNT(*) FROM people GROUP BY scope')
+            cursor.execute("SELECT scope, COUNT(*) FROM people GROUP BY scope")
             counts = {row[0]: row[1] for row in cursor.fetchall()}
-            cursor.execute('SELECT name FROM people_scopes ORDER BY name')
+            cursor.execute("SELECT name FROM people_scopes ORDER BY name")
             registered = [row[0] for row in cursor.fetchall()]
-            all_scopes = set(registered) | set(counts.keys()) | {'default'}
-            return [{"name": name, "count": counts.get(name, 0)} for name in sorted(all_scopes)]
+            all_scopes = set(registered) | set(counts.keys()) | {"default"}
+            return [
+                {"name": name, "count": counts.get(name, 0)}
+                for name in sorted(all_scopes)
+            ]
     except Exception as e:
         logger.error(f"Error getting people scopes: {e}")
         return [{"name": "default", "count": 0}]
@@ -438,7 +487,9 @@ def create_people_scope(name: str) -> bool:
     try:
         with _get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("INSERT OR IGNORE INTO people_scopes (name) VALUES (?)", (name,))
+            cursor.execute(
+                "INSERT OR IGNORE INTO people_scopes (name) VALUES (?)", (name,)
+            )
             conn.commit()
             return True
     except Exception as e:
@@ -447,15 +498,15 @@ def create_people_scope(name: str) -> bool:
 
 
 def delete_people_scope(name: str) -> dict:
-    if name == 'default':
+    if name == "default":
         return {"error": "Cannot delete the default scope"}
     try:
         with _get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT COUNT(*) FROM people WHERE scope = ?', (name,))
+            cursor.execute("SELECT COUNT(*) FROM people WHERE scope = ?", (name,))
             count = cursor.fetchone()[0]
-            cursor.execute('DELETE FROM people WHERE scope = ?', (name,))
-            cursor.execute('DELETE FROM people_scopes WHERE name = ?', (name,))
+            cursor.execute("DELETE FROM people WHERE scope = ?", (name,))
+            cursor.execute("DELETE FROM people_scopes WHERE name = ?", (name,))
             conn.commit()
             logger.info(f"Deleted people scope '{name}' with {count} people")
             return {"deleted_people": count}
@@ -466,43 +517,78 @@ def delete_people_scope(name: str) -> dict:
 
 # ─── People CRUD ──────────────────────────────────────────────────────────────
 
-def get_people(scope='default'):
+
+def get_people(scope="default"):
     with _get_connection() as conn:
         cursor = conn.cursor()
         scope_sql, scope_params = _scope_condition(scope)
-        cursor.execute(f'SELECT id, name, relationship, phone, email, address, notes, created_at, updated_at, email_whitelisted FROM people WHERE {scope_sql} ORDER BY name', scope_params)
+        cursor.execute(
+            f"SELECT id, name, relationship, phone, email, address, notes, created_at, updated_at, email_whitelisted FROM people WHERE {scope_sql} ORDER BY name",
+            scope_params,
+        )
         rows = cursor.fetchall()
-        return [{"id": r[0], "name": r[1], "relationship": r[2], "phone": r[3],
-                 "email": r[4], "address": r[5], "notes": r[6],
-                 "created_at": r[7], "updated_at": r[8],
-                 "email_whitelisted": bool(r[9])} for r in rows]
+        return [
+            {
+                "id": r[0],
+                "name": r[1],
+                "relationship": r[2],
+                "phone": r[3],
+                "email": r[4],
+                "address": r[5],
+                "notes": r[6],
+                "created_at": r[7],
+                "updated_at": r[8],
+                "email_whitelisted": bool(r[9]),
+            }
+            for r in rows
+        ]
 
 
-def create_or_update_person(name, relationship=None, phone=None, email=None, address=None, notes=None, scope='default', person_id=None, email_whitelisted=None):
+def create_or_update_person(
+    name,
+    relationship=None,
+    phone=None,
+    email=None,
+    address=None,
+    notes=None,
+    scope="default",
+    person_id=None,
+    email_whitelisted=None,
+):
     with _get_connection() as conn:
         cursor = conn.cursor()
 
         # If ID provided, update by ID directly (allows name changes)
         if person_id:
-            cursor.execute('SELECT id FROM people WHERE id = ? AND scope = ?', (person_id, scope))
+            cursor.execute(
+                "SELECT id FROM people WHERE id = ? AND scope = ?", (person_id, scope)
+            )
         else:
             # Fallback: match by name (for AI tool calls)
-            cursor.execute('SELECT id FROM people WHERE LOWER(name) = LOWER(?) AND scope = ?', (name.strip(), scope))
+            cursor.execute(
+                "SELECT id FROM people WHERE LOWER(name) = LOWER(?) AND scope = ?",
+                (name.strip(), scope),
+            )
         existing = cursor.fetchone()
 
         # Build embed text for semantic search
         parts = [name.strip()]
-        if relationship: parts.append(f"relationship: {relationship}")
-        if phone: parts.append(f"phone: {phone}")
-        if email: parts.append(f"email: {email}")
-        if address: parts.append(f"address: {address}")
-        if notes: parts.append(f"notes: {notes}")
-        embed_text = '. '.join(parts)
+        if relationship:
+            parts.append(f"relationship: {relationship}")
+        if phone:
+            parts.append(f"phone: {phone}")
+        if email:
+            parts.append(f"email: {email}")
+        if address:
+            parts.append(f"address: {address}")
+        if notes:
+            parts.append(f"notes: {notes}")
+        embed_text = ". ".join(parts)
 
         embedding_blob = None
         embedder = _get_embedder()
         if embedder and embedder.available:
-            embs = embedder.embed([embed_text], prefix='search_document')
+            embs = embedder.embed([embed_text], prefix="search_document")
             if embs is not None:
                 embedding_blob = embs[0].tobytes()
 
@@ -512,24 +598,47 @@ def create_or_update_person(name, relationship=None, phone=None, email=None, add
             pid = existing[0]
             # Update provided fields — empty string clears to NULL, None means "don't touch"
             updates, params = [], []
-            for col, val in [('relationship', relationship), ('phone', phone),
-                             ('email', email), ('address', address), ('notes', notes)]:
+            for col, val in [
+                ("relationship", relationship),
+                ("phone", phone),
+                ("email", email),
+                ("address", address),
+                ("notes", notes),
+            ]:
                 if val is not None:
-                    updates.append(f'{col} = ?'); params.append(val if val else None)
+                    updates.append(f"{col} = ?")
+                    params.append(val if val else None)
             if email_whitelisted is not None:
-                updates.append('email_whitelisted = ?'); params.append(int(email_whitelisted))
+                updates.append("email_whitelisted = ?")
+                params.append(int(email_whitelisted))
             if name.strip():
-                updates.append('name = ?'); params.append(name.strip())
-            updates.append('embedding = ?'); params.append(embedding_blob)
-            updates.append('updated_at = ?'); params.append(now)
+                updates.append("name = ?")
+                params.append(name.strip())
+            updates.append("embedding = ?")
+            params.append(embedding_blob)
+            updates.append("updated_at = ?")
+            params.append(now)
             params.append(pid)
-            cursor.execute(f'UPDATE people SET {", ".join(updates)} WHERE id = ?', params)
+            cursor.execute(
+                f"UPDATE people SET {', '.join(updates)} WHERE id = ?", params
+            )
             conn.commit()
             return pid, False  # (id, is_new)
         else:
             cursor.execute(
-                'INSERT INTO people (name, relationship, phone, email, address, notes, scope, embedding, updated_at, email_whitelisted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                (name.strip(), relationship, phone, email, address, notes, scope, embedding_blob, now, int(email_whitelisted) if email_whitelisted else 0)
+                "INSERT INTO people (name, relationship, phone, email, address, notes, scope, embedding, updated_at, email_whitelisted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    name.strip(),
+                    relationship,
+                    phone,
+                    email,
+                    address,
+                    notes,
+                    scope,
+                    embedding_blob,
+                    now,
+                    int(email_whitelisted) if email_whitelisted else 0,
+                ),
             )
             pid = cursor.lastrowid
             conn.commit()
@@ -540,37 +649,58 @@ def delete_person(person_id):
     scope = _get_current_people_scope()
     with _get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT name FROM people WHERE id = ? AND scope = ?', (person_id, scope))
+        cursor.execute(
+            "SELECT name FROM people WHERE id = ? AND scope = ?", (person_id, scope)
+        )
         row = cursor.fetchone()
         if not row:
             return False
-        cursor.execute('DELETE FROM people WHERE id = ? AND scope = ?', (person_id, scope))
+        cursor.execute(
+            "DELETE FROM people WHERE id = ? AND scope = ?", (person_id, scope)
+        )
         conn.commit()
         return True
 
 
 # ─── Knowledge Tabs CRUD ─────────────────────────────────────────────────────
 
-def get_tabs(scope='default', tab_type=None):
+
+def get_tabs(scope="default", tab_type=None):
     with _get_connection() as conn:
         cursor = conn.cursor()
-        scope_sql, scope_params = _scope_condition(scope, 't.scope')
+        scope_sql, scope_params = _scope_condition(scope, "t.scope")
         if tab_type:
-            cursor.execute(f'''
+            cursor.execute(
+                f"""
                 SELECT t.id, t.name, t.description, t.type, t.scope, t.created_at, t.updated_at,
                        (SELECT COUNT(*) FROM knowledge_entries WHERE tab_id = t.id) as entry_count
                 FROM knowledge_tabs t WHERE {scope_sql} AND t.type = ? ORDER BY t.name
-            ''', scope_params + [tab_type])
+            """,
+                scope_params + [tab_type],
+            )
         else:
-            cursor.execute(f'''
+            cursor.execute(
+                f"""
                 SELECT t.id, t.name, t.description, t.type, t.scope, t.created_at, t.updated_at,
                        (SELECT COUNT(*) FROM knowledge_entries WHERE tab_id = t.id) as entry_count
                 FROM knowledge_tabs t WHERE {scope_sql} ORDER BY t.name
-            ''', scope_params)
+            """,
+                scope_params,
+            )
         rows = cursor.fetchall()
-        return [{"id": r[0], "name": r[1], "description": r[2], "type": r[3],
-                 "scope": r[4], "created_at": r[5], "updated_at": r[6],
-                 "entry_count": r[7]} for r in rows]
+        return [
+            {
+                "id": r[0],
+                "name": r[1],
+                "description": r[2],
+                "type": r[3],
+                "scope": r[4],
+                "created_at": r[5],
+                "updated_at": r[6],
+                "entry_count": r[7],
+            }
+            for r in rows
+        ]
 
 
 def get_tab_entries(tab_id, scope=None):
@@ -578,26 +708,35 @@ def get_tab_entries(tab_id, scope=None):
         cursor = conn.cursor()
         if scope:
             # Validate tab belongs to requested scope before returning entries
-            cursor.execute('SELECT scope FROM knowledge_tabs WHERE id = ?', (tab_id,))
+            cursor.execute("SELECT scope FROM knowledge_tabs WHERE id = ?", (tab_id,))
             row = cursor.fetchone()
             if not row or row[0] != scope:
                 return []
         cursor.execute(
-            'SELECT id, content, chunk_index, source_filename, created_at, updated_at FROM knowledge_entries WHERE tab_id = ? ORDER BY chunk_index, created_at',
-            (tab_id,)
+            "SELECT id, content, chunk_index, source_filename, created_at, updated_at FROM knowledge_entries WHERE tab_id = ? ORDER BY chunk_index, created_at",
+            (tab_id,),
         )
         rows = cursor.fetchall()
-        return [{"id": r[0], "content": r[1], "chunk_index": r[2],
-                 "source_filename": r[3], "created_at": r[4], "updated_at": r[5]} for r in rows]
+        return [
+            {
+                "id": r[0],
+                "content": r[1],
+                "chunk_index": r[2],
+                "source_filename": r[3],
+                "created_at": r[4],
+                "updated_at": r[5],
+            }
+            for r in rows
+        ]
 
 
-def create_tab(name, scope='default', description=None, tab_type='user'):
+def create_tab(name, scope="default", description=None, tab_type="user"):
     with _get_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute(
-                'INSERT INTO knowledge_tabs (name, description, type, scope) VALUES (?, ?, ?, ?)',
-                (name.strip(), description, tab_type, scope)
+                "INSERT INTO knowledge_tabs (name, description, type, scope) VALUES (?, ?, ?, ?)",
+                (name.strip(), description, tab_type, scope),
             )
             tab_id = cursor.lastrowid
             conn.commit()
@@ -612,14 +751,20 @@ def update_tab(tab_id, name=None, description=None):
         cursor = conn.cursor()
         updates, params = [], []
         if name is not None:
-            updates.append('name = ?'); params.append(name.strip())
+            updates.append("name = ?")
+            params.append(name.strip())
         if description is not None:
-            updates.append('description = ?'); params.append(description)
+            updates.append("description = ?")
+            params.append(description)
         if not updates:
             return False
-        updates.append('updated_at = ?'); params.append(datetime.now().isoformat())
+        updates.append("updated_at = ?")
+        params.append(datetime.now().isoformat())
         params.extend([tab_id, scope])
-        cursor.execute(f'UPDATE knowledge_tabs SET {", ".join(updates)} WHERE id = ? AND scope = ?', params)
+        cursor.execute(
+            f"UPDATE knowledge_tabs SET {', '.join(updates)} WHERE id = ? AND scope = ?",
+            params,
+        )
         changed = cursor.rowcount > 0
         conn.commit()
         return changed
@@ -629,11 +774,16 @@ def delete_tab(tab_id):
     scope = _get_current_scope()
     with _get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT name FROM knowledge_tabs WHERE id = ? AND scope = ?', (tab_id, scope))
+        cursor.execute(
+            "SELECT name FROM knowledge_tabs WHERE id = ? AND scope = ?",
+            (tab_id, scope),
+        )
         if not cursor.fetchone():
             return False
-        cursor.execute('DELETE FROM knowledge_entries WHERE tab_id = ?', (tab_id,))
-        cursor.execute('DELETE FROM knowledge_tabs WHERE id = ? AND scope = ?', (tab_id, scope))
+        cursor.execute("DELETE FROM knowledge_entries WHERE tab_id = ?", (tab_id,))
+        cursor.execute(
+            "DELETE FROM knowledge_tabs WHERE id = ? AND scope = ?", (tab_id, scope)
+        )
         conn.commit()
         return True
 
@@ -642,35 +792,43 @@ def delete_tab(tab_id):
 
 MAX_ENTRIES_PER_SCOPE = 50_000  # ~20MB of text + embeddings
 
+
 def add_entry(tab_id, content, chunk_index=0, source_filename=None):
     embedding_blob = None
     embedder = _get_embedder()
     if embedder and embedder.available:
-        embs = embedder.embed([content], prefix='search_document')
+        embs = embedder.embed([content], prefix="search_document")
         if embs is not None:
             embedding_blob = embs[0].tobytes()
 
     with _get_connection() as conn:
         cursor = conn.cursor()
         # Check scope entry cap
-        cursor.execute('''
+        cursor.execute(
+            """
             SELECT COUNT(*) FROM knowledge_entries
             WHERE tab_id IN (SELECT id FROM knowledge_tabs WHERE scope = (
                 SELECT scope FROM knowledge_tabs WHERE id = ?
             ))
-        ''', (tab_id,))
+        """,
+            (tab_id,),
+        )
         count = cursor.fetchone()[0]
         if count >= MAX_ENTRIES_PER_SCOPE:
-            raise ValueError(f"Knowledge scope entry limit reached ({MAX_ENTRIES_PER_SCOPE:,})")
+            raise ValueError(
+                f"Knowledge scope entry limit reached ({MAX_ENTRIES_PER_SCOPE:,})"
+            )
 
         cursor.execute(
-            'INSERT INTO knowledge_entries (tab_id, content, chunk_index, source_filename, embedding) VALUES (?, ?, ?, ?, ?)',
-            (tab_id, content, chunk_index, source_filename, embedding_blob)
+            "INSERT INTO knowledge_entries (tab_id, content, chunk_index, source_filename, embedding) VALUES (?, ?, ?, ?, ?)",
+            (tab_id, content, chunk_index, source_filename, embedding_blob),
         )
         entry_id = cursor.lastrowid
         # Bump tab updated_at
-        cursor.execute('UPDATE knowledge_tabs SET updated_at = ? WHERE id = ?',
-                       (datetime.now().isoformat(), tab_id))
+        cursor.execute(
+            "UPDATE knowledge_tabs SET updated_at = ? WHERE id = ?",
+            (datetime.now().isoformat(), tab_id),
+        )
         conn.commit()
         return entry_id
 
@@ -679,15 +837,15 @@ def update_entry(entry_id, content):
     embedding_blob = None
     embedder = _get_embedder()
     if embedder and embedder.available:
-        embs = embedder.embed([content], prefix='search_document')
+        embs = embedder.embed([content], prefix="search_document")
         if embs is not None:
             embedding_blob = embs[0].tobytes()
 
     with _get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            'UPDATE knowledge_entries SET content = ?, embedding = ?, updated_at = ? WHERE id = ?',
-            (content, embedding_blob, datetime.now().isoformat(), entry_id)
+            "UPDATE knowledge_entries SET content = ?, embedding = ?, updated_at = ? WHERE id = ?",
+            (content, embedding_blob, datetime.now().isoformat(), entry_id),
         )
         changed = cursor.rowcount > 0
         conn.commit()
@@ -697,10 +855,10 @@ def update_entry(entry_id, content):
 def delete_entry(entry_id):
     with _get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT id FROM knowledge_entries WHERE id = ?', (entry_id,))
+        cursor.execute("SELECT id FROM knowledge_entries WHERE id = ?", (entry_id,))
         if not cursor.fetchone():
             return False
-        cursor.execute('DELETE FROM knowledge_entries WHERE id = ?', (entry_id,))
+        cursor.execute("DELETE FROM knowledge_entries WHERE id = ?", (entry_id,))
         conn.commit()
         return True
 
@@ -709,12 +867,16 @@ def delete_entries_by_filename(tab_id, filename):
     """Delete all entries in a tab that came from a specific uploaded file."""
     with _get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM knowledge_entries WHERE tab_id = ? AND source_filename = ?',
-                       (tab_id, filename))
+        cursor.execute(
+            "SELECT COUNT(*) FROM knowledge_entries WHERE tab_id = ? AND source_filename = ?",
+            (tab_id, filename),
+        )
         count = cursor.fetchone()[0]
         if count:
-            cursor.execute('DELETE FROM knowledge_entries WHERE tab_id = ? AND source_filename = ?',
-                           (tab_id, filename))
+            cursor.execute(
+                "DELETE FROM knowledge_entries WHERE tab_id = ? AND source_filename = ?",
+                (tab_id, filename),
+            )
             conn.commit()
         return count
 
@@ -723,7 +885,9 @@ def get_tabs_by_id(tab_id):
     """Get a single tab by ID."""
     with _get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT id, name, type, scope FROM knowledge_tabs WHERE id = ?', (tab_id,))
+        cursor.execute(
+            "SELECT id, name, type, scope FROM knowledge_tabs WHERE id = ?", (tab_id,)
+        )
         row = cursor.fetchone()
         if not row:
             return None
@@ -732,18 +896,25 @@ def get_tabs_by_id(tab_id):
 
 # ─── RAG Helpers ─────────────────────────────────────────────────────────────
 
+
 def get_entries_by_scope(scope):
     """Get all entries in a scope, grouped by source_filename."""
     with _get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
+        cursor.execute(
+            """
             SELECT e.source_filename, COUNT(*), SUM(LENGTH(e.content))
             FROM knowledge_entries e JOIN knowledge_tabs t ON e.tab_id = t.id
             WHERE t.scope = ?
             GROUP BY e.source_filename
-        ''', (scope,))
+        """,
+            (scope,),
+        )
         rows = cursor.fetchall()
-        return [{"filename": r[0] or "(untitled)", "chunks": r[1], "chars": r[2]} for r in rows]
+        return [
+            {"filename": r[0] or "(untitled)", "chunks": r[1], "chars": r[2]}
+            for r in rows
+        ]
 
 
 def search_rag(query, scope, limit=5, threshold=0.40, max_tokens=4000):
@@ -752,7 +923,7 @@ def search_rag(query, scope, limit=5, threshold=0.40, max_tokens=4000):
     if not embedder or not embedder.available:
         return []
 
-    query_emb = embedder.embed([query], prefix='search_query')
+    query_emb = embedder.embed([query], prefix="search_query")
     if query_emb is None:
         return []
     query_vec = query_emb[0]
@@ -760,12 +931,15 @@ def search_rag(query, scope, limit=5, threshold=0.40, max_tokens=4000):
     with _get_connection() as conn:
         cursor = conn.cursor()
         # Strict scope match — no global overlay for RAG
-        cursor.execute('''
+        cursor.execute(
+            """
             SELECT e.id, e.content, t.name, e.embedding, e.source_filename
             FROM knowledge_entries e JOIN knowledge_tabs t ON e.tab_id = t.id
             WHERE t.scope = ? AND e.embedding IS NOT NULL
             LIMIT 10000
-        ''', (scope,))
+        """,
+            (scope,),
+        )
         rows = cursor.fetchall()
 
     scored = []
@@ -773,7 +947,9 @@ def search_rag(query, scope, limit=5, threshold=0.40, max_tokens=4000):
         emb = np.frombuffer(emb_blob, dtype=np.float32)
         sim = float(np.dot(query_vec, emb))
         if sim >= threshold:
-            scored.append({"content": content, "filename": src_file or tname, "score": sim})
+            scored.append(
+                {"content": content, "filename": src_file or tname, "score": sim}
+            )
     scored.sort(key=lambda x: x["score"], reverse=True)
 
     # Accumulate up to token budget
@@ -794,7 +970,9 @@ def cleanup_orphaned_rag_scopes(valid_chat_names):
     try:
         with _get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT scope FROM knowledge_tabs WHERE scope LIKE '__rag__:%'")
+            cursor.execute(
+                "SELECT DISTINCT scope FROM knowledge_tabs WHERE scope LIKE '__rag__:%'"
+            )
             rag_scopes = [r[0] for r in cursor.fetchall()]
 
         if not rag_scopes:
@@ -814,26 +992,35 @@ def delete_entries_by_scope_and_filename(scope, filename):
     """Delete all entries for a specific file within a RAG scope."""
     with _get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
+        cursor.execute(
+            """
             SELECT e.id FROM knowledge_entries e
             JOIN knowledge_tabs t ON e.tab_id = t.id
             WHERE t.scope = ? AND e.source_filename = ?
-        ''', (scope, filename))
+        """,
+            (scope, filename),
+        )
         entry_ids = [r[0] for r in cursor.fetchall()]
         if entry_ids:
-            placeholders = ','.join('?' * len(entry_ids))
-            cursor.execute(f'DELETE FROM knowledge_entries WHERE id IN ({placeholders})', entry_ids)
+            placeholders = ",".join("?" * len(entry_ids))
+            cursor.execute(
+                f"DELETE FROM knowledge_entries WHERE id IN ({placeholders})", entry_ids
+            )
         # Clean up empty tabs
-        cursor.execute('''
+        cursor.execute(
+            """
             DELETE FROM knowledge_tabs WHERE scope = ? AND id NOT IN (
                 SELECT DISTINCT tab_id FROM knowledge_entries
             )
-        ''', (scope,))
+        """,
+            (scope,),
+        )
         conn.commit()
         return len(entry_ids)
 
 
 # ─── Chunking ─────────────────────────────────────────────────────────────────
+
 
 def _chunk_text(text, max_tokens=400, overlap_tokens=50):
     """Split text into chunks respecting token limits.
@@ -847,7 +1034,7 @@ def _chunk_text(text, max_tokens=400, overlap_tokens=50):
     # --- Break into atomic segments using cascading splitters ---
 
     # 1. Paragraph breaks (best semantic boundary)
-    segments = [p.strip() for p in text.split('\n\n') if p.strip()]
+    segments = [p.strip() for p in text.split("\n\n") if p.strip()]
     if not segments:
         return [text]
 
@@ -857,7 +1044,7 @@ def _chunk_text(text, max_tokens=400, overlap_tokens=50):
         if len(seg.split()) <= max_tokens:
             refined.append(seg)
         else:
-            refined.extend(l.strip() for l in seg.split('\n') if l.strip())
+            refined.extend(l.strip() for l in seg.split("\n") if l.strip())
     segments = refined
 
     # 3. Sentence boundaries for oversized lines
@@ -866,7 +1053,7 @@ def _chunk_text(text, max_tokens=400, overlap_tokens=50):
         if len(seg.split()) <= max_tokens:
             refined.append(seg)
         else:
-            parts = re.split(r'(?<=[.!?])\s+(?=[A-Z])', seg)
+            parts = re.split(r"(?<=[.!?])\s+(?=[A-Z])", seg)
             refined.extend(s.strip() for s in parts if s.strip())
     segments = refined
 
@@ -878,7 +1065,7 @@ def _chunk_text(text, max_tokens=400, overlap_tokens=50):
         else:
             words = seg.split()
             for i in range(0, len(words), max_tokens):
-                piece = ' '.join(words[i:i + max_tokens])
+                piece = " ".join(words[i : i + max_tokens])
                 if piece:
                     refined.append(piece)
     segments = refined
@@ -891,7 +1078,7 @@ def _chunk_text(text, max_tokens=400, overlap_tokens=50):
     for seg in segments:
         seg_len = len(seg.split())
         if current and current_len + seg_len > max_tokens:
-            chunks.append('\n\n'.join(current))
+            chunks.append("\n\n".join(current))
             if overlap_tokens > 0 and current:
                 last = current[-1]
                 if len(last.split()) <= overlap_tokens:
@@ -907,24 +1094,25 @@ def _chunk_text(text, max_tokens=400, overlap_tokens=50):
         current_len += seg_len
 
     if current:
-        chunks.append('\n\n'.join(current))
+        chunks.append("\n\n".join(current))
 
     return chunks if chunks else [text]
 
 
 # ─── Search ───────────────────────────────────────────────────────────────────
 
+
 def _sanitize_fts_query(query, use_or=False, use_prefix=False):
-    sanitized = re.sub(r'[^\w\s"*]', ' ', query)
-    sanitized = re.sub(r'\s+', ' ', sanitized).strip()
+    sanitized = re.sub(r'[^\w\s"*]', " ", query)
+    sanitized = re.sub(r"\s+", " ", sanitized).strip()
     if not sanitized or '"' in sanitized:
         return sanitized
     terms = sanitized.split()
     if use_prefix:
-        terms = [t + '*' if not t.endswith('*') else t for t in terms]
+        terms = [t + "*" if not t.endswith("*") else t for t in terms]
     if use_or and len(terms) > 1:
-        return ' OR '.join(terms)
-    return ' '.join(terms)
+        return " OR ".join(terms)
+    return " ".join(terms)
 
 
 def _search_entries(query, scope, category=None, limit=10):
@@ -937,8 +1125,10 @@ def _search_entries(query, scope, category=None, limit=10):
         tab_filter = ""
         tab_params = []
         if category:
-            cursor.execute(f'SELECT id FROM knowledge_tabs WHERE LOWER(name) = LOWER(?) AND {scope_sql}',
-                           [category] + scope_params)
+            cursor.execute(
+                f"SELECT id FROM knowledge_tabs WHERE LOWER(name) = LOWER(?) AND {scope_sql}",
+                [category] + scope_params,
+            )
             tab = cursor.fetchone()
             if not tab:
                 return []
@@ -946,11 +1136,13 @@ def _search_entries(query, scope, category=None, limit=10):
             tab_params = [tab[0]]
         else:
             # All tabs in scope
-            cursor.execute(f'SELECT id FROM knowledge_tabs WHERE {scope_sql}', scope_params)
+            cursor.execute(
+                f"SELECT id FROM knowledge_tabs WHERE {scope_sql}", scope_params
+            )
             tab_ids = [r[0] for r in cursor.fetchall()]
             if not tab_ids:
                 return []
-            placeholders = ','.join('?' * len(tab_ids))
+            placeholders = ",".join("?" * len(tab_ids))
             tab_filter = f" AND e.tab_id IN ({placeholders})"
             tab_params = tab_ids
 
@@ -958,14 +1150,26 @@ def _search_entries(query, scope, category=None, limit=10):
         seen_ids = set()
 
         # Strategy 0: Filename match
-        cursor.execute(f'''
+        cursor.execute(
+            f"""
             SELECT e.id, e.content, t.name as tab_name, e.source_filename
             FROM knowledge_entries e JOIN knowledge_tabs t ON e.tab_id = t.id
             WHERE e.source_filename LIKE ?{tab_filter}
             ORDER BY e.chunk_index LIMIT ?
-        ''', [f'%{query}%'] + tab_params + [limit])
+        """,
+            [f"%{query}%"] + tab_params + [limit],
+        )
         for r in cursor.fetchall():
-            results.append({"id": r[0], "content": r[1], "tab": r[2], "file": r[3], "source": "knowledge", "score": 0.96})
+            results.append(
+                {
+                    "id": r[0],
+                    "content": r[1],
+                    "tab": r[2],
+                    "file": r[3],
+                    "source": "knowledge",
+                    "score": 0.96,
+                }
+            )
             seen_ids.add(r[0])
 
         # Strategy 1: FTS AND
@@ -973,28 +1177,34 @@ def _search_entries(query, scope, category=None, limit=10):
         fts_exact = _sanitize_fts_query(query)
         if fts_exact:
             try:
-                cursor.execute(f'''
+                cursor.execute(
+                    f"""
                     SELECT e.id, e.content, t.name as tab_name, e.source_filename
                     FROM knowledge_fts f
                     JOIN knowledge_entries e ON f.rowid = e.id
                     JOIN knowledge_tabs t ON e.tab_id = t.id
                     WHERE knowledge_fts MATCH ?{tab_filter}
                     ORDER BY bm25(knowledge_fts) LIMIT ?
-                ''', [fts_exact] + tab_params + [limit])
+                """,
+                    [fts_exact] + tab_params + [limit],
+                )
                 fts_results = cursor.fetchall()
 
                 # Strategy 2: FTS OR + prefix
                 if not fts_results:
                     fts_broad = _sanitize_fts_query(query, use_or=True, use_prefix=True)
                     if fts_broad != fts_exact:
-                        cursor.execute(f'''
+                        cursor.execute(
+                            f"""
                             SELECT e.id, e.content, t.name as tab_name, e.source_filename
                             FROM knowledge_fts f
                             JOIN knowledge_entries e ON f.rowid = e.id
                             JOIN knowledge_tabs t ON e.tab_id = t.id
                             WHERE knowledge_fts MATCH ?{tab_filter}
                             ORDER BY bm25(knowledge_fts) LIMIT ?
-                        ''', [fts_broad] + tab_params + [limit])
+                        """,
+                            [fts_broad] + tab_params + [limit],
+                        )
                         fts_results = cursor.fetchall()
             except sqlite3.OperationalError as e:
                 logger.warning(f"Knowledge FTS query failed: {e}")
@@ -1002,8 +1212,15 @@ def _search_entries(query, scope, category=None, limit=10):
     # Add FTS results
     for r in fts_results:
         if r[0] not in seen_ids:
-            entry = {"id": r[0], "content": r[1], "tab": r[2], "source": "knowledge", "score": 0.95}
-            if r[3]: entry["file"] = r[3]
+            entry = {
+                "id": r[0],
+                "content": r[1],
+                "tab": r[2],
+                "source": "knowledge",
+                "score": 0.95,
+            }
+            if r[3]:
+                entry["file"] = r[3]
             results.append(entry)
             seen_ids.add(r[0])
 
@@ -1020,19 +1237,29 @@ def _search_entries(query, scope, category=None, limit=10):
             cursor = conn.cursor()
             terms = query.lower().split()[:5]
             if terms:
-                conditions = ' OR '.join(['e.content LIKE ?' for _ in terms])
-                params = [f'%{t}%' for t in terms]
-                cursor.execute(f'''
+                conditions = " OR ".join(["e.content LIKE ?" for _ in terms])
+                params = [f"%{t}%" for t in terms]
+                cursor.execute(
+                    f"""
                     SELECT e.id, e.content, t.name as tab_name, e.source_filename
                     FROM knowledge_entries e
                     JOIN knowledge_tabs t ON e.tab_id = t.id
                     WHERE ({conditions}){tab_filter}
                     ORDER BY e.updated_at DESC LIMIT ?
-                ''', params + tab_params + [limit])
+                """,
+                    params + tab_params + [limit],
+                )
                 for r in cursor.fetchall():
                     if r[0] not in seen_ids:
-                        entry = {"id": r[0], "content": r[1], "tab": r[2], "source": "knowledge", "score": 0.35}
-                        if r[3]: entry["file"] = r[3]
+                        entry = {
+                            "id": r[0],
+                            "content": r[1],
+                            "tab": r[2],
+                            "source": "knowledge",
+                            "score": 0.35,
+                        }
+                        if r[3]:
+                            entry["file"] = r[3]
                         results.append(entry)
 
     return results
@@ -1043,7 +1270,7 @@ def _vector_search_entries(query, scope, category=None, limit=10):
     if not embedder or not embedder.available:
         return []
 
-    query_emb = embedder.embed([query], prefix='search_query')
+    query_emb = embedder.embed([query], prefix="search_query")
     if query_emb is None:
         return []
     query_vec = query_emb[0]
@@ -1051,19 +1278,25 @@ def _vector_search_entries(query, scope, category=None, limit=10):
     with _get_connection() as conn:
         cursor = conn.cursor()
 
-        scope_sql, scope_params = _scope_condition(scope, 't.scope')
+        scope_sql, scope_params = _scope_condition(scope, "t.scope")
         if category:
-            cursor.execute(f'''
+            cursor.execute(
+                f"""
                 SELECT e.id, e.content, t.name, e.embedding, e.source_filename
                 FROM knowledge_entries e JOIN knowledge_tabs t ON e.tab_id = t.id
                 WHERE {scope_sql} AND LOWER(t.name) = LOWER(?) AND e.embedding IS NOT NULL
-            ''', scope_params + [category])
+            """,
+                scope_params + [category],
+            )
         else:
-            cursor.execute(f'''
+            cursor.execute(
+                f"""
                 SELECT e.id, e.content, t.name, e.embedding, e.source_filename
                 FROM knowledge_entries e JOIN knowledge_tabs t ON e.tab_id = t.id
                 WHERE {scope_sql} AND e.embedding IS NOT NULL
-            ''', scope_params)
+            """,
+                scope_params,
+            )
 
         rows = cursor.fetchall()
 
@@ -1072,37 +1305,57 @@ def _vector_search_entries(query, scope, category=None, limit=10):
         emb = np.frombuffer(emb_blob, dtype=np.float32)
         sim = float(np.dot(query_vec, emb))
         if sim >= SIMILARITY_THRESHOLD:
-            entry = {"id": eid, "content": content, "tab": tname, "source": "knowledge", "score": sim}
-            if src_file: entry["file"] = src_file
+            entry = {
+                "id": eid,
+                "content": content,
+                "tab": tname,
+                "source": "knowledge",
+                "score": sim,
+            }
+            if src_file:
+                entry["file"] = src_file
             scored.append(entry)
 
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:limit]
 
 
-def _search_people(query, scope='default', limit=10):
+def _search_people(query, scope="default", limit=10):
     """Search people via vector + LIKE. Only returns actual matches."""
     results = []
 
     # Vector search — use higher threshold for people (their embeddings are dense info strings)
     embedder = _get_embedder()
     if embedder and embedder.available:
-        query_emb = embedder.embed([query], prefix='search_query')
+        query_emb = embedder.embed([query], prefix="search_query")
         if query_emb is not None:
             query_vec = query_emb[0]
             with _get_connection() as conn:
                 cursor = conn.cursor()
                 scope_sql, scope_params = _scope_condition(scope)
-                cursor.execute(f'SELECT id, name, relationship, phone, email, address, notes, embedding FROM people WHERE {scope_sql} AND embedding IS NOT NULL', scope_params)
+                cursor.execute(
+                    f"SELECT id, name, relationship, phone, email, address, notes, embedding FROM people WHERE {scope_sql} AND embedding IS NOT NULL",
+                    scope_params,
+                )
                 rows = cursor.fetchall()
             for pid, name, rel, phone, email, addr, notes, emb_blob in rows:
                 emb = np.frombuffer(emb_blob, dtype=np.float32)
                 sim = float(np.dot(query_vec, emb))
                 # Higher threshold for people — their dense contact strings match too broadly at 0.40
                 if sim >= 0.55:
-                    results.append({"id": pid, "name": name, "relationship": rel,
-                                    "phone": phone, "email": email, "address": addr,
-                                    "notes": notes, "source": "people", "score": sim})
+                    results.append(
+                        {
+                            "id": pid,
+                            "name": name,
+                            "relationship": rel,
+                            "phone": phone,
+                            "email": email,
+                            "address": addr,
+                            "notes": notes,
+                            "source": "people",
+                            "score": sim,
+                        }
+                    )
             results.sort(key=lambda x: x["score"], reverse=True)
             return results[:limit]
 
@@ -1111,34 +1364,60 @@ def _search_people(query, scope='default', limit=10):
         cursor = conn.cursor()
         terms = query.lower().split()[:5]
         if terms:
-            conditions = ' OR '.join(['(LOWER(name) LIKE ? OR LOWER(relationship) LIKE ? OR LOWER(notes) LIKE ?)' for _ in terms])
+            conditions = " OR ".join(
+                [
+                    "(LOWER(name) LIKE ? OR LOWER(relationship) LIKE ? OR LOWER(notes) LIKE ?)"
+                    for _ in terms
+                ]
+            )
             params = []
             for t in terms:
-                params.extend([f'%{t}%', f'%{t}%', f'%{t}%'])
+                params.extend([f"%{t}%", f"%{t}%", f"%{t}%"])
             scope_sql, scope_params = _scope_condition(scope)
-            cursor.execute(f'''
+            cursor.execute(
+                f"""
                 SELECT id, name, relationship, phone, email, address, notes
                 FROM people WHERE {scope_sql} AND ({conditions}) ORDER BY name LIMIT ?
-            ''', scope_params + params + [limit])
+            """,
+                scope_params + params + [limit],
+            )
             rows = cursor.fetchall()
             # LIKE results get a low fixed score so they sort below vector matches
-            return [{"id": r[0], "name": r[1], "relationship": r[2], "phone": r[3],
-                     "email": r[4], "address": r[5], "notes": r[6], "source": "people", "score": 0.3} for r in rows]
+            return [
+                {
+                    "id": r[0],
+                    "name": r[1],
+                    "relationship": r[2],
+                    "phone": r[3],
+                    "email": r[4],
+                    "address": r[5],
+                    "notes": r[6],
+                    "source": "people",
+                    "score": 0.3,
+                }
+                for r in rows
+            ]
 
         return []
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def _format_person(p):
     pid = f"[id:{p['id']}] " if p.get("id") else ""
     parts = [f"{pid}{p['name']}"]
-    if p.get("relationship"): parts.append(f"({p['relationship']})")
+    if p.get("relationship"):
+        parts.append(f"({p['relationship']})")
     details = []
-    if p.get("phone"): details.append(f"phone: {p['phone']}")
-    if p.get("email"): details.append(f"email: {p['email']}")
-    if p.get("address"): details.append(f"address: {p['address']}")
-    if p.get("notes"): details.append(f"notes: {p['notes']}")
+    if p.get("phone"):
+        details.append(f"phone: {p['phone']}")
+    if p.get("email"):
+        details.append(f"email: {p['email']}")
+    if p.get("address"):
+        details.append(f"address: {p['address']}")
+    if p.get("notes"):
+        details.append(f"notes: {p['notes']}")
     if details:
         parts.append("— " + ", ".join(details))
     return " ".join(parts)
@@ -1149,7 +1428,9 @@ def _expand_with_neighbors(results):
     if not results:
         return results
 
-    knowledge_results = [r for r in results if r.get("source") == "knowledge" and r.get("file")]
+    knowledge_results = [
+        r for r in results if r.get("source") == "knowledge" and r.get("file")
+    ]
     if not knowledge_results:
         return results
 
@@ -1164,20 +1445,26 @@ def _expand_with_neighbors(results):
                 continue
 
             cursor.execute(
-                'SELECT chunk_index, tab_id FROM knowledge_entries WHERE id = ?',
-                (r["id"],))
+                "SELECT chunk_index, tab_id FROM knowledge_entries WHERE id = ?",
+                (r["id"],),
+            )
             row = cursor.fetchone()
             if not row or row[0] is None:
                 expanded.append(r)
                 continue
 
             chunk_idx, tab_id = row
-            cursor.execute('''
+            cursor.execute(
+                """
                 SELECT id, chunk_index, content FROM knowledge_entries
                 WHERE tab_id = ? AND source_filename = ? AND chunk_index IN (?, ?)
                 ORDER BY chunk_index
-            ''', (tab_id, r["file"], chunk_idx - 1, chunk_idx + 1))
-            neighbors = {n[1]: n[2] for n in cursor.fetchall() if n[0] not in result_ids}
+            """,
+                (tab_id, r["file"], chunk_idx - 1, chunk_idx + 1),
+            )
+            neighbors = {
+                n[1]: n[2] for n in cursor.fetchall() if n[0] not in result_ids
+            }
 
             parts = []
             if chunk_idx - 1 in neighbors:
@@ -1187,7 +1474,7 @@ def _expand_with_neighbors(results):
                 parts.append(neighbors[chunk_idx + 1])
 
             r = dict(r)
-            r["content"] = '\n\n'.join(parts)
+            r["content"] = "\n\n".join(parts)
             expanded.append(r)
 
         return expanded
@@ -1202,26 +1489,37 @@ def _format_entry(r, query=None, max_len=4000):
     if len(content) <= max_len:
         preview = content
     else:
-        preview = content[:max_len] + '...'
+        preview = content[:max_len] + "..."
 
     return f"{tab_info}{file_info}{eid}{preview}"
 
 
 # ─── Tool Operations ─────────────────────────────────────────────────────────
 
-def _save_person(name, relationship=None, phone=None, email=None, address=None, notes=None, scope='default'):
+
+def _save_person(
+    name,
+    relationship=None,
+    phone=None,
+    email=None,
+    address=None,
+    notes=None,
+    scope="default",
+):
     if not name or not name.strip():
         return "Person name is required.", False
     if len(name) > 100:
         return "Name too long (max 100 chars).", False
 
-    pid, is_new = create_or_update_person(name, relationship, phone, email, address, notes, scope=scope)
+    pid, is_new = create_or_update_person(
+        name, relationship, phone, email, address, notes, scope=scope
+    )
     action = "Saved new" if is_new else "Updated"
     logger.info(f"{action} person [{pid}] '{name.strip()}' (scope: {scope})")
     return f"{action} contact: {name.strip()} (ID: {pid})", True
 
 
-def _save_knowledge(category, content, description=None, scope='default'):
+def _save_knowledge(category, content, description=None, scope="default"):
     if not category or not category.strip():
         return "Category name is required.", False
     if not content or not content.strip():
@@ -1235,14 +1533,16 @@ def _save_knowledge(category, content, description=None, scope='default'):
     # Get or create category (stored as knowledge_tab)
     with _get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT id FROM knowledge_tabs WHERE LOWER(name) = LOWER(?) AND scope = ?',
-                       (category, scope))
+        cursor.execute(
+            "SELECT id FROM knowledge_tabs WHERE LOWER(name) = LOWER(?) AND scope = ?",
+            (category, scope),
+        )
         row = cursor.fetchone()
 
     if row:
         tab_id = row[0]
     else:
-        tab_id = create_tab(category, scope, description, tab_type='ai')
+        tab_id = create_tab(category, scope, description, tab_type="ai")
         if not tab_id:
             return f"Failed to create category '{category}'.", False
 
@@ -1253,22 +1553,34 @@ def _save_knowledge(category, content, description=None, scope='default'):
         eid = add_entry(tab_id, chunk, chunk_index=i)
         entry_ids.append(eid)
 
-    ids_str = ', '.join(f'id:{eid}' for eid in entry_ids)
+    ids_str = ", ".join(f"id:{eid}" for eid in entry_ids)
     chunk_note = f" ({len(chunks)} chunks)" if len(chunks) > 1 else ""
-    logger.info(f"Saved knowledge to '{category}' in scope '{scope}': {len(chunks)} entries")
+    logger.info(
+        f"Saved knowledge to '{category}' in scope '{scope}': {len(chunks)} entries"
+    )
     return f"Saved to '{category}'{chunk_note} [{ids_str}] — {len(content)} chars", True
 
 
-def _search_knowledge(query=None, category=None, entry_id=None, limit=10, scope='default', people_scope='default'):
+def _search_knowledge(
+    query=None,
+    category=None,
+    entry_id=None,
+    limit=10,
+    scope="default",
+    people_scope="default",
+):
     # Mode 1: Read a single entry in full by ID
     if entry_id:
         with _get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
+            cursor.execute(
+                """
                 SELECT e.id, e.content, t.name, t.type
                 FROM knowledge_entries e JOIN knowledge_tabs t ON e.tab_id = t.id
                 WHERE e.id = ?
-            ''', (entry_id,))
+            """,
+                (entry_id,),
+            )
             row = cursor.fetchone()
         if not row:
             return f"Entry {entry_id} not found.", True
@@ -1279,8 +1591,10 @@ def _search_knowledge(query=None, category=None, entry_id=None, limit=10, scope=
         with _get_connection() as conn:
             cursor = conn.cursor()
             scope_sql, scope_params = _scope_condition(scope)
-            cursor.execute(f'SELECT id FROM knowledge_tabs WHERE LOWER(name) = LOWER(?) AND {scope_sql}',
-                           [category] + scope_params)
+            cursor.execute(
+                f"SELECT id FROM knowledge_tabs WHERE LOWER(name) = LOWER(?) AND {scope_sql}",
+                [category] + scope_params,
+            )
             tab = cursor.fetchone()
         if not tab:
             return f"Category '{category}' not found in scope '{scope}'.", True
@@ -1290,7 +1604,7 @@ def _search_knowledge(query=None, category=None, entry_id=None, limit=10, scope=
         lines = [f"=== {category} ({len(entries)} entries) ==="]
         for e in entries:
             lines.append(f"  [id:{e['id']}] {e['content']}")
-        return '\n'.join(lines), True
+        return "\n".join(lines), True
 
     # Mode 3: Overview (no query, no category, no id)
     if not query:
@@ -1309,7 +1623,7 @@ def _search_knowledge(query=None, category=None, entry_id=None, limit=10, scope=
         lines.append(f"\n=== Categories (scope: {scope}, {len(tabs)}) ===")
         if tabs:
             for t in tabs:
-                type_tag = f" [{t['type']}]" if t['type'] == 'ai' else ""
+                type_tag = f" [{t['type']}]" if t["type"] == "ai" else ""
                 lines.append(f"  {t['name']}{type_tag} — {t['entry_count']} entries")
         else:
             lines.append("  (none)")
@@ -1321,11 +1635,13 @@ def _search_knowledge(query=None, category=None, entry_id=None, limit=10, scope=
             if rag_docs:
                 lines.append(f"\n=== Uploaded Documents ({len(rag_docs)}) ===")
                 for d in rag_docs:
-                    lines.append(f"  {d['filename']} — {d['chunks']} chunks, {d['chars']} chars")
+                    lines.append(
+                        f"  {d['filename']} — {d['chunks']} chunks, {d['chars']} chars"
+                    )
 
         if not lines:
             return "Your knowledge base is empty.", True
-        return '\n'.join(lines), True
+        return "\n".join(lines), True
 
     # Mode 4: Search (query provided)
     results = []
@@ -1361,10 +1677,10 @@ def _search_knowledge(query=None, category=None, entry_id=None, limit=10, scope=
         else:
             lines.append(f"---\n[Knowledge] {_format_entry(r, query=query)}")
 
-    return '\n'.join(lines), True
+    return "\n".join(lines), True
 
 
-def _delete_knowledge(entry_id=None, category=None, scope='default'):
+def _delete_knowledge(entry_id=None, category=None, scope="default"):
     if not entry_id and not category:
         return "Provide id or category to delete.", False
 
@@ -1373,39 +1689,53 @@ def _delete_knowledge(entry_id=None, category=None, scope='default'):
 
         if entry_id:
             # Delete single entry — must belong to an AI tab
-            cursor.execute('''
+            cursor.execute(
+                """
                 SELECT e.id, e.content, t.id, t.name, t.type
                 FROM knowledge_entries e JOIN knowledge_tabs t ON e.tab_id = t.id
                 WHERE e.id = ?
-            ''', (entry_id,))
+            """,
+                (entry_id,),
+            )
             row = cursor.fetchone()
             if not row:
                 return f"Entry {entry_id} not found.", False
-            if row[4] != 'ai':
-                return f"Cannot delete user-created content (entry {entry_id} in tab '{row[3]}').", False
+            if row[4] != "ai":
+                return (
+                    f"Cannot delete user-created content (entry {entry_id} in tab '{row[3]}').",
+                    False,
+                )
             tab_id, tab_name_str = row[2], row[3]
 
         if category and not entry_id:
             # Delete entire category — must be AI type
-            cursor.execute('SELECT id, type FROM knowledge_tabs WHERE LOWER(name) = LOWER(?) AND scope = ?',
-                           (category, scope))
+            cursor.execute(
+                "SELECT id, type FROM knowledge_tabs WHERE LOWER(name) = LOWER(?) AND scope = ?",
+                (category, scope),
+            )
             row = cursor.fetchone()
             if not row:
                 return f"Category '{category}' not found in scope '{scope}'.", False
-            if row[1] != 'ai':
+            if row[1] != "ai":
                 return f"Cannot delete user-created category '{category}'.", False
 
     if entry_id:
         delete_entry(entry_id)
-        preview = row[1][:100] + ('...' if len(row[1]) > 100 else '')
+        preview = row[1][:100] + ("..." if len(row[1]) > 100 else "")
         logger.info(f"AI deleted entry [{entry_id}] from tab '{tab_name_str}'")
         # Auto-delete empty AI tab
         remaining = get_tab_entries(tab_id)
         if not remaining:
             delete_tab(tab_id)
             logger.info(f"Auto-deleted empty AI tab '{tab_name_str}'")
-            return f"Deleted entry [id:{entry_id}] from tab '{tab_name_str}': {preview}\nTab '{tab_name_str}' is now empty and was removed.", True
-        return f"Deleted entry [id:{entry_id}] from tab '{tab_name_str}': {preview}", True
+            return (
+                f"Deleted entry [id:{entry_id}] from tab '{tab_name_str}': {preview}\nTab '{tab_name_str}' is now empty and was removed.",
+                True,
+            )
+        return (
+            f"Deleted entry [id:{entry_id}] from tab '{tab_name_str}': {preview}",
+            True,
+        )
 
     if category:
         delete_tab(row[0])
@@ -1417,6 +1747,7 @@ def _delete_knowledge(entry_id=None, category=None, scope='default'):
 
 # ─── Executor ─────────────────────────────────────────────────────────────────
 
+
 def execute(function_name, arguments, config):
     try:
         scope = _get_current_scope()
@@ -1426,27 +1757,33 @@ def execute(function_name, arguments, config):
         if function_name == "save_person":
             if people_scope is None:
                 return "People contacts are disabled for this chat.", False
-            if people_scope == 'global':
-                return "Cannot write to the global scope. Global is read-only for the AI — only the user can add entries there via the UI.", False
+            if people_scope == "global":
+                return (
+                    "Cannot write to the global scope. Global is read-only for the AI — only the user can add entries there via the UI.",
+                    False,
+                )
             return _save_person(
-                name=arguments.get('name'),
-                relationship=arguments.get('relationship'),
-                phone=arguments.get('phone'),
-                email=arguments.get('email'),
-                address=arguments.get('address'),
-                notes=arguments.get('notes'),
+                name=arguments.get("name"),
+                relationship=arguments.get("relationship"),
+                phone=arguments.get("phone"),
+                email=arguments.get("email"),
+                address=arguments.get("address"),
+                notes=arguments.get("notes"),
                 scope=people_scope,
             )
 
         elif function_name == "save_knowledge":
             if scope is None:
                 return "Knowledge base is disabled for this chat.", False
-            if scope == 'global':
-                return "Cannot write to the global scope. Global is read-only for the AI — only the user can add entries there via the UI.", False
+            if scope == "global":
+                return (
+                    "Cannot write to the global scope. Global is read-only for the AI — only the user can add entries there via the UI.",
+                    False,
+                )
             return _save_knowledge(
-                category=arguments.get('category'),
-                content=arguments.get('content'),
-                description=arguments.get('description'),
+                category=arguments.get("category"),
+                content=arguments.get("content"),
+                description=arguments.get("description"),
                 scope=scope,
             )
 
@@ -1455,11 +1792,11 @@ def execute(function_name, arguments, config):
             if scope is None and people_scope is None:
                 return "Knowledge base is disabled for this chat.", False
             return _search_knowledge(
-                query=arguments.get('query'),
-                category=arguments.get('category'),
-                entry_id=arguments.get('id'),
-                limit=arguments.get('limit', 10),
-                scope=scope or 'default',
+                query=arguments.get("query"),
+                category=arguments.get("category"),
+                entry_id=arguments.get("id"),
+                limit=arguments.get("limit", 10),
+                scope=scope or "default",
                 people_scope=people_scope,
             )
 
@@ -1467,8 +1804,8 @@ def execute(function_name, arguments, config):
             if scope is None:
                 return "Knowledge base is disabled for this chat.", False
             return _delete_knowledge(
-                entry_id=arguments.get('id'),
-                category=arguments.get('category'),
+                entry_id=arguments.get("id"),
+                category=arguments.get("category"),
                 scope=scope,
             )
 
