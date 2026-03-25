@@ -26,7 +26,14 @@
       "story_engine_enabled": false,
       "story_preset": null,
       "story_vars_in_prompt": false,
-      "story_in_prompt": true
+      "story_in_prompt": true,
+      "startup": {
+        "rules": "Use [self] to refer to yourself (the AI assistant). Use [user] to refer to the user. Check core.db on startup for context and assigned tasks.",
+        "things_to_read": "Check memory, knowledge, and todos in core.db for recent context.",
+        "report_to": "{user}",
+        "on_problem": "Report the problem to {user} with details about what went wrong and any error messages.",
+        "on_complete": "Report completion to {user} with a summary of what was accomplished."
+      }
     }
   },
   "cobalt": {

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="csrf-token" content="{{ csrf_token() }}">
-    <title>Sapphire</title>
+    <title>NEOS</title>
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
     <link rel="stylesheet" href="/static/shared.css?v={{ v }}">
 
@@ -18,7 +18,7 @@
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="Sapphire">
+    <meta name="apple-mobile-web-app-title" content="NEOS">
     <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
 
     <script>
@@ -55,7 +55,7 @@
          NAV RAIL (left, 64px desktop / bottom bar mobile)
          ================================================================ -->
     <nav id="nav-rail">
-        <div class="nav-logo" title="Sapphire">S</div>
+        <div class="nav-logo" title="NEOS">S</div>
 
         <button class="nav-item active" data-view="chat">
             <span class="nav-icon">&#x1F4AC;</span>
@@ -230,10 +230,35 @@
                             </div>
                         </div>
 
+                        <!-- Startup Config -->
+                        <div class="sb-startup-section" id="sb-startup-section">
+                            <div class="sb-field">
+                                <label for="sb-startup-rules">Rules</label>
+                                <textarea id="sb-startup-rules" rows="2" placeholder="Agent rules and guidelines"></textarea>
+                            </div>
+                            <div class="sb-field">
+                                <label for="sb-startup-read">Things to Read</label>
+                                <textarea id="sb-startup-read" rows="2" placeholder="Information to read on startup"></textarea>
+                            </div>
+                            <div class="sb-field">
+                                <label for="sb-startup-report">Report To</label>
+                                <input type="text" id="sb-startup-report" placeholder="Who to report results to">
+                            </div>
+                            <div class="sb-field">
+                                <label for="sb-startup-problem">On Problem</label>
+                                <textarea id="sb-startup-problem" rows="2" placeholder="What to do when encountering problems"></textarea>
+                            </div>
+                            <div class="sb-field">
+                                <label for="sb-startup-complete">On Complete</label>
+                                <textarea id="sb-startup-complete" rows="2" placeholder="What to do when task is finished"></textarea>
+                            </div>
+                        </div>
+
                         <!-- Quick toggles -->
                         <div class="sb-toggles">
                             <button type="button" class="sb-toggle active" id="sb-spice-toggle" data-active="true">Spice &middot; 3</button>
                             <button type="button" class="sb-toggle" id="sb-datetime-toggle" data-active="false">Date/Time</button>
+                            <button type="button" class="sb-toggle" id="sb-startup-toggle" data-active="false">Startup</button>
                         </div>
 
                         <!-- Mind Scopes Accordion -->
@@ -347,6 +372,11 @@
                                 <div class="sb-field sb-field-stack">
                                     <label>Speed: <span id="sb-speed-val">1.3</span></label>
                                     <input type="range" id="sb-speed" min="0.5" max="2.5" step="0.1" value="1.3">
+                                </div>
+                                <div class="sb-field">
+                                    <button id="sb-test-voice" class="btn btn-secondary btn-sm" style="width: 100%; margin-top: 8px;">
+                                        🔊 Test Voice
+                                    </button>
                                 </div>
                             </div>
                         </div>
@@ -529,7 +559,7 @@
                 </div>
                 <div class="up-field">
                     <label for="up-username">Your Name</label>
-                    <input type="text" id="up-username" placeholder="What should Sapphire call you?">
+                    <input type="text" id="up-username" placeholder="What should NEOS call you?">
                 </div>
                 <div class="up-divider"></div>
                 <div class="up-field">

@@ -306,12 +306,21 @@ export default {
             }
         };
 
-        // Toggle buttons (Spice, Date/Time)
+        // Toggle buttons (Spice, Date/Time, Startup)
         container.querySelectorAll('.sb-toggle').forEach(btn => {
             btn.addEventListener('click', () => {
                 const active = btn.dataset.active !== 'true';
                 btn.dataset.active = active;
                 btn.classList.toggle('active', active);
+
+                // Show/hide startup section
+                if (btn.id === 'sb-startup-toggle') {
+                    const section = container.querySelector('#sb-startup-section');
+                    if (section) {
+                        section.style.display = active ? 'block' : 'none';
+                    }
+                }
+
                 debouncedSave(container);
             });
         });
@@ -792,6 +801,25 @@ async function loadSidebar() {
             applyTrimColor(settings.trim_color || '');
         }
 
+        // Startup config
+        const startup = settings.startup || {};
+        setVal(container, '#sb-startup-rules', startup.rules || '');
+        setVal(container, '#sb-startup-read', startup.things_to_read || '');
+        setVal(container, '#sb-startup-report', startup.report_to || '');
+        setVal(container, '#sb-startup-problem', startup.on_problem || '');
+        setVal(container, '#sb-startup-complete', startup.on_complete || '');
+
+        // Startup toggle - show section if startup has any content
+        const hasStartup = startup.rules || startup.things_to_read || startup.report_to || startup.on_problem || startup.on_complete;
+        const startupToggle = container.querySelector('#sb-startup-toggle');
+        const startupSection = container.querySelector('#sb-startup-section');
+        if (startupToggle && startupSection) {
+            const isActive = hasStartup || settings.startup_enabled === true;
+            startupToggle.dataset.active = isActive;
+            startupToggle.classList.toggle('active', isActive);
+            startupSection.style.display = isActive ? 'block' : 'none';
+        }
+
         // Update labels
         const pitchLabel = container.querySelector('#sb-pitch-val');
         if (pitchLabel) pitchLabel.textContent = settings.pitch || 0.98;
@@ -895,7 +923,15 @@ function collectSettings(container) {
         story_preset: getVal(container, '#sb-story-preset') || null,
         story_in_prompt: getChecked(container, '#sb-story-in-prompt'),
         story_vars_in_prompt: getChecked(container, '#sb-story-vars'),
-        rag_context: getVal(container, '#sb-rag-context') || 'normal'
+        rag_context: getVal(container, '#sb-rag-context') || 'normal',
+        startup_enabled: getToggle(container, '#sb-startup-toggle'),
+        startup: {
+            rules: getVal(container, '#sb-startup-rules') || '',
+            things_to_read: getVal(container, '#sb-startup-read') || '',
+            report_to: getVal(container, '#sb-startup-report') || '',
+            on_problem: getVal(container, '#sb-startup-problem') || '',
+            on_complete: getVal(container, '#sb-startup-complete') || ''
+        }
     };
 }
 
